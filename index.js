@@ -372,6 +372,7 @@ async function lookupMember(email, env) {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
+        'Authorization': `Bearer ${env.BH_ANON_KEY}`,
         'x-sync-secret': env.SYNC_SECRET
       },
       body: JSON.stringify({
@@ -397,6 +398,7 @@ async function creditMember(userId, nctrAmount, lockType, source, merchantId, en
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
+        'Authorization': `Bearer ${env.BH_ANON_KEY}`,
         'x-sync-secret': env.SYNC_SECRET
       },
       body: JSON.stringify({
