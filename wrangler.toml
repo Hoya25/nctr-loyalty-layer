@@ -17,12 +17,16 @@
 # integration loses its base URL.
 
 name = "nctr-loyalty-layer"
-main = "index.js"
+main = "src/index.js"
 compatibility_date = "2024-01-01"
 workers_dev = false
 
 [vars]
+# BOTH plain vars must stay declared. [vars] REPLACES all plain_text bindings at
+# deploy time, so omitting either one wipes it from the deployed worker.
 BH_SUPABASE_URL = "https://auibudfactqhisvmiotw.supabase.co"
+# Earn Rate Registry. A project URL, not a credential — the anon key is a secret.
+REGISTRY_SUPABASE_URL = "https://xbzonbjgcvvugsrsrwbg.supabase.co"
 
 # api.nctr.live is attached to this worker as a Custom Domain (not a Route).
 # Declaring it makes the deploy idempotent and self-documenting.
