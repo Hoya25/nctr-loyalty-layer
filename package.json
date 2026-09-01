@@ -10,7 +10,7 @@
     "deploy": "wrangler deploy",
     "tail": "wrangler tail nctr-loyalty-layer --format pretty",
     "test": "node --test test/disclosure.test.mjs",
-    "test:live": "node --test test/"
+    "test:live": "node --test test/disclosure.test.mjs test/live-gate.test.mjs"
   },
   "devDependencies": {
     "wrangler": "^4.106.0"
