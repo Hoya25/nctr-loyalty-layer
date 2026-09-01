@@ -1,0 +1,31 @@
+# NCTR Loyalty Layer — Cloudflare Worker serving api.nctr.live
+#
+# Deploys from THIS machine (Mac mini). Auth comes from the CLOUDFLARE_API_TOKEN
+# environment variable; `wrangler whoami` should show account d1c2385...0b071.
+#
+# Values below mirror what is already deployed — read from the Cloudflare API on
+# 2026-08-21 so a deploy from here cannot silently change the worker's shape.
+#
+# SECRETS ARE NOT DECLARED HERE AND MUST NOT BE. These eight bindings live on the
+# worker and are preserved across deploys:
+#   BASE_RPC_URL, BEACON_ANON_KEY, BEACON_SUPABASE_URL, BH_ANON_KEY,
+#   COMMITMENT_CONTRACT_ADDRESS, SYNC_SECRET, WORKER_PRIVATE_KEY   (secret_text)
+#   BH_SUPABASE_URL                                                (plain_text -> [vars] below)
+#
+# BH_SUPABASE_URL is plain_text on the deployed worker. Plain vars are REPLACED by
+# whatever [vars] contains at deploy time, so it must stay declared here or the BH
+# integration loses its base URL.
+
+name = "nctr-loyalty-layer"
+main = "index.js"
+compatibility_date = "2024-01-01"
+workers_dev = false
+
+[vars]
+BH_SUPABASE_URL = "https://auibudfactqhisvmiotw.supabase.co"
+
+# api.nctr.live is attached to this worker as a Custom Domain (not a Route).
+# Declaring it makes the deploy idempotent and self-documenting.
+[[routes]]
+pattern = "api.nctr.live"
+custom_domain = true

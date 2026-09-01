@@ -3,7 +3,7 @@
  * api.nctr.live
  *
  * Handles two commerce tracks:
- *   Track 1 (traditional): 90LOCK, database credit, no on-chain action
+ *   Track 1 (traditional): 90-day settlement hold, database credit, no on-chain action
  *   Track 2 (x402): on-chain delivery + liquidity commitment proof
  *
  * Endpoints:
@@ -42,6 +42,19 @@ import { privateKeyToAccount } from 'viem/accounts';
 // CONTRACT ABI (minimal for our calls)
 // ============================================================
 
+// ── /loyalty/verify kill switch ────────────────────────────────────────────
+// OFFLINE until the commitment records are re-seeded under genuine transaction
+// hashes. The nine records currently in the contract are keyed 0x..01–0x..09
+// (counters passed to commitFromTransaction at seeding time, not tx hashes),
+// so a correct verifier returns false for every record that exists. An endpoint
+// that answers false to everything is worse than one that is not published.
+// Flip to true once re-seeding lands — the handler below is already correct.
+const VERIFY_ENDPOINT_ENABLED = false;
+
+// A transaction hash is exactly 32 bytes. Anything else is rejected before
+// it reaches viem or the contract.
+const TX_HASH_PATTERN = /^0x[0-9a-fA-F]{64}$/;
+
 const COMMITMENT_ABI = parseAbi([
   'function commitFromTransaction(uint256 usdcAmount, bytes32 txHash) external',
   'function getCommitmentStats() external view returns (uint256 totalUsdcCommitted, uint256 totalLpTokensHeld, uint256 currentPoolDepth, uint256 commitmentRate, uint256 transactionCount, uint256 lastCommitmentTimestamp)',
@@ -54,16 +67,21 @@ const COMMITMENT_ABI = parseAbi([
 // TIER CONFIGURATION
 // ============================================================
 
+// Canon v15 (locked). These are NOT display-only: multiplier feeds the live
+// credit calculation in handleWrap(). Bronze was 1.0 and Silver 1.25 here, both
+// off-canon and under-crediting members. Corrected 2026-08-21.
 const TIERS = {
-  Bronze:   { multiplier: 1.0,  label: 'Bronze' },
-  Silver:   { multiplier: 1.25, label: 'Silver' },
-  Gold:     { multiplier: 1.5,  label: 'Gold' },
-  Platinum: { multiplier: 1.8,  label: 'Platinum' },
-  Diamond:  { multiplier: 2.5,  label: 'Diamond' }
+  Bronze:   { multiplier: 1.1, threshold: 1000,   label: 'Bronze' },
+  Silver:   { multiplier: 1.3, threshold: 5000,   label: 'Silver' },
+  Gold:     { multiplier: 1.5, threshold: 15000,  label: 'Gold' },
+  Platinum: { multiplier: 1.8, threshold: 40000,  label: 'Platinum' },
+  Diamond:  { multiplier: 2.5, threshold: 100000, label: 'Diamond' }
 };
 
 // NCTR earned per dollar of purchase (base rate before tier multiplier)
-const NCTR_PER_DOLLAR = 2.5;
+// Canon base earn rate: 5 NCTR per $1. Was 2.5 here, which both mis-published the
+// rate and under-credited every member earning through /loyalty/wrap.
+const NCTR_PER_DOLLAR = 5;
 
 // SaaC fee rates by integration tier
 const SAAC_FEE_RATES = {
@@ -113,7 +131,7 @@ export default {
       }
 
       if (path === '/loyalty/tiers') {
-        return handleTiers();
+        return await handleTiers(env);
       }
 
       if (path === '/loyalty/stats') {
@@ -125,6 +143,16 @@ export default {
       }
 
       if (path === '/loyalty/verify') {
+        if (!VERIFY_ENDPOINT_ENABLED) {
+          return jsonResponse({
+            error: 'endpoint_unavailable',
+            message: 'Commitment verification is temporarily unavailable. The liquidity commitment contract remains live and independently readable on BaseScan.',
+            contract: env.COMMITMENT_CONTRACT_ADDRESS || null,
+            verifiable_at: env.COMMITMENT_CONTRACT_ADDRESS
+              ? `https://basescan.org/address/${env.COMMITMENT_CONTRACT_ADDRESS}`
+              : null
+          }, 503);
+        }
         const txHash = url.searchParams.get('tx');
         return await handleVerify(txHash, env);
       }
@@ -266,7 +294,7 @@ async function handleWrap(request, env) {
   const response = {
     success: true,
     nctr_earned: nctrEarned,
-    lock_type: effectiveLockType,
+    settlement: describeSettlement(effectiveLockType),
     tier: tierInfo.label,
     multiplier: tierInfo.multiplier,
     member_balance: creditResult.new_balance,
@@ -277,7 +305,7 @@ async function handleWrap(request, env) {
       source,
       merchant_id,
       nctr_earned: nctrEarned,
-      lock_type: effectiveLockType,
+      settlement: describeSettlement(effectiveLockType),
       timestamp: new Date().toISOString()
     }
   };
@@ -481,11 +509,16 @@ async function handleStats(env) {
 
       const [totalUsdcCommitted, totalLpTokensHeld, currentPoolDepth, commitmentRate, transactionCount, lastCommitmentTimestamp] = stats;
 
+      // total_usdc_committed / total_lp_tokens_held / pool_depth_usdc are
+      // deliberately NOT surfaced. They are raw base-unit integers — USDC
+      // carries 6 decimals, so the contract's 260000 is 0.26 USDC, and
+      // publishing it unscaled overstated committed liquidity by 1e6.
+      // Rescaling is not the fix: committed liquidity amounts stay out of
+      // public responses entirely. What is publishable is that commitments
+      // exist, when the last one landed, and how long the lock runs.
+      // commitment_rate_bps is also withheld: a routing rate is a mechanism
+      // detail, and disclosure canon keeps rates and splits out of public copy.
       onChainStats = {
-        total_usdc_committed: Number(totalUsdcCommitted),
-        total_lp_tokens_held: Number(totalLpTokensHeld),
-        pool_depth_usdc: Number(currentPoolDepth),
-        commitment_rate_bps: Number(commitmentRate),
         transaction_count: Number(transactionCount),
         last_commitment: Number(lastCommitmentTimestamp)
       };
@@ -499,14 +532,16 @@ async function handleStats(env) {
 
       const [lockExpiry, lockRemaining, isLocked, extCount, withdrawAddr] = lockData;
 
+      // withdrawal_address is withheld: it is the ops wallet, and publishing it
+      // in machine-readable form hands an analyst a starting point rather than
+      // leaving it to be found. The lock itself is the publishable asset.
       lockInfo = {
         expiry: Number(lockExpiry),
         expiry_date: new Date(Number(lockExpiry) * 1000).toISOString(),
         remaining_seconds: Number(lockRemaining),
         remaining_days: Math.floor(Number(lockRemaining) / 86400),
         active: isLocked,
-        extensions: Number(extCount),
-        withdrawal_address: withdrawAddr
+        extensions: Number(extCount)
       };
     } catch (err) {
       console.error('Failed to read on-chain data:', err.message);
@@ -520,7 +555,7 @@ async function handleStats(env) {
     on_chain: onChainStats,
     lock: lockInfo,
     tracks: {
-      track_1: 'Traditional commerce — 90LOCK, database credit',
+      track_1: 'Traditional commerce — 90-day settlement hold, database credit',
       track_2: 'x402 agent-native — on-chain delivery, liquidity proof'
     },
     verifiable_at: contractAddress
@@ -533,42 +568,142 @@ async function handleStats(env) {
 // GET /loyalty/tiers — Three-tier pricing info
 // ============================================================
 
-function handleTiers() {
-  return jsonResponse({
-    tiers: [
+// ── Phase 2: canonical tier/benefit schedule ────────────────────────────────
+//
+// Reads the single source of truth: BH's crescendo_schedule_public view. Every
+// surface derives from it; nothing holds a local copy. The TIERS constant below
+// survives ONLY as a fallback for when the view is unreachable.
+//
+// DELIBERATE SCOPE LIMIT: this feeds the PUBLISHED response only. handleWrap()
+// still computes member credits from the TIERS constant, so a network blip can
+// never change what a member is paid. Unifying the two is Phase 5, and it should
+// not happen until the view has proven stable. Until then, a drift guard below
+// flags any disagreement rather than silently letting them diverge.
+const SCHEDULE_STALE_AFTER_SECONDS = 48 * 60 * 60;
+
+async function fetchSchedule(env) {
+  const base = env.BH_SUPABASE_URL;
+  const key = env.BH_ANON_KEY;
+  if (!base || !key) return null;
+
+  try {
+    const res = await fetch(
+      `${base}/rest/v1/crescendo_schedule_public?select=*&order=rank.asc`,
       {
-        name: 'Tier 1 — Beacon / Shopify',
-        source: 'beacon',
-        monthly_fee: '$99',
-        per_tx_fee: '1%',
-        description: 'Full Shopify integration with webhooks, reserve system, and bounty dashboard'
-      },
-      {
-        name: 'Tier 2 — API Integration',
-        source: 'api',
-        monthly_fee: '$29',
-        per_tx_fee: '1.5%',
-        description: 'Direct API integration — works with any platform'
-      },
-      {
-        name: 'Tier 3 — Agent-Native x402',
-        source: 'x402',
-        monthly_fee: '$0',
-        per_tx_fee: '2%',
-        description: 'Zero-friction agent-native transactions with verifiable on-chain liquidity proof'
+        headers: {
+          apikey: key,
+          Authorization: `Bearer ${key}`,
+          Accept: 'application/json'
+        },
+        signal: AbortSignal.timeout(4000)
       }
-    ],
-    fee_split: {
-      monthly: '50% brand 360LOCK / 50% treasury',
-      per_tx: '50% 24-month locked liquidity / 50% treasury'
-    },
-    nctr_per_dollar: NCTR_PER_DOLLAR,
-    crescendo_tiers: Object.entries(TIERS).map(([key, val]) => ({
+    );
+    if (!res.ok) {
+      console.error('schedule fetch failed:', res.status);
+      return null;
+    }
+    const rows = await res.json();
+    return Array.isArray(rows) && rows.length ? rows : null;
+  } catch (err) {
+    console.error('schedule fetch error:', err && err.message);
+    return null;
+  }
+}
+
+// Compares the view against the local constant. Any disagreement is surfaced,
+// never silently resolved — the constant is what actually pays members.
+function detectConfigDrift(rows) {
+  const drift = [];
+  for (const r of rows) {
+    const local = TIERS[r.label];
+    if (!local) { drift.push(`${r.label}: no local tier`); continue; }
+    if (Number(local.multiplier) !== Number(r.earn_multiplier)) {
+      drift.push(`${r.label}.multiplier local=${local.multiplier} view=${r.earn_multiplier}`);
+    }
+    if (Number(local.threshold) !== Number(r.nctr_required)) {
+      drift.push(`${r.label}.threshold local=${local.threshold} view=${r.nctr_required}`);
+    }
+  }
+  return drift;
+}
+
+async function handleTiers(env) {
+  const rows = await fetchSchedule(env);
+
+  let crescendoTiers;
+  let meta;
+
+  if (rows) {
+    crescendoTiers = rows.map((r) => ({
+      name: r.label,
+      nctr_required: Number(r.nctr_required),
+      multiplier: Number(r.earn_multiplier),
+      benefits: Array.isArray(r.benefits) ? r.benefits : []
+    }));
+
+    const syncedAt = rows[0].last_synced_at;
+    const ageSeconds = syncedAt
+      ? Math.max(0, Math.floor((Date.now() - new Date(syncedAt).getTime()) / 1000))
+      : null;
+
+    meta = {
+      last_synced_at: syncedAt || null,
+      age_seconds: ageSeconds,
+      stale: ageSeconds !== null && ageSeconds > SCHEDULE_STALE_AFTER_SECONDS,
+      schema_version: rows[0].schema_version || null,
+      source: 'schedule'
+    };
+
+    const drift = detectConfigDrift(rows);
+    if (drift.length) {
+      console.error('CONFIG DRIFT — published schedule disagrees with credit constants:', drift.join('; '));
+      meta.config_drift = true;
+      meta.config_drift_detail = drift;
+    }
+  } else {
+    // View unreachable. Serve the constant and say so — a silent fallback that
+    // looks identical to fresh data is how stale facts survive unnoticed.
+    crescendoTiers = Object.entries(TIERS).map(([, val]) => ({
       name: val.label,
-      multiplier: val.multiplier
-    })),
-    lock_model: '24-month verifiable lockup with rolling extensions',
-    note: 'Merchants set their own bounty rate. Higher bounties attract more agent traffic.'
+      nctr_required: val.threshold,
+      multiplier: val.multiplier,
+      benefits: []
+    }));
+    meta = {
+      last_synced_at: null,
+      age_seconds: null,
+      stale: null,
+      schema_version: 'v15',
+      source: 'worker_constant',
+      degraded: true
+    };
+  }
+
+  return jsonResponse({
+    membership: {
+      name: 'Alliance Member',
+      description: 'One membership for brands joining the Alliance. Integration is available through the Beacon app for Shopify, a direct API for any other platform, and an agent-native x402 path.',
+      integration_paths: ['beacon', 'api', 'x402']
+    },
+
+    // The cooperative mechanic is deliberate public canon and stays. It is stated
+    // qualitatively on purpose — the mechanic is the point, not a rate card.
+    cooperative_model: {
+      principle: 'SaaS charges you for access. SaaC makes you an owner.',
+      how_it_works: 'Half of what a brand contributes to the Alliance comes back to that brand as NCTR, committed through 360LOCK. The remainder sustains the Alliance and its committed liquidity.',
+      brand_position: 'Brands participate as owners in the network they sell through, not as tenants paying for access.'
+    },
+
+    // Member earning math — publishable in full.
+    // nctr_per_dollar intentionally still sourced from the Worker constant: it
+    // computes real member credits, so it stays single-sourced until Phase 5.
+    nctr_per_dollar: NCTR_PER_DOLLAR,
+    crescendo_tiers: crescendoTiers,
+
+    member_commitment: '360LOCK — member NCTR is committed for 360 days.',
+    liquidity_commitment: '24-month verifiable lockup with rolling extensions, held in a verified contract on Base.',
+    note: 'Brands set their own bounty rate. Higher bounties attract more agent traffic.',
+    meta: meta
   });
 }
 
@@ -579,7 +714,19 @@ function handleTiers() {
 async function handleVerify(txHash, env) {
   if (!txHash) {
     return jsonResponse({
-      error: 'Missing tx parameter. Usage: /loyalty/verify?tx=0x...'
+      error: 'missing_tx_parameter',
+      message: 'Usage: /loyalty/verify?tx=0x… (32-byte transaction hash)'
+    }, 400);
+  }
+
+  const hash = txHash.startsWith('0x') ? txHash : `0x${txHash}`;
+
+  // Reject malformed input outright. Previously anything non-bytes32 fell
+  // through to viem and surfaced as a 500 with the library version attached.
+  if (!TX_HASH_PATTERN.test(hash)) {
+    return jsonResponse({
+      error: 'invalid_tx_hash',
+      message: 'tx must be a 32-byte hex transaction hash: 0x followed by 64 hex characters.'
     }, 400);
   }
 
@@ -588,9 +735,15 @@ async function handleVerify(txHash, env) {
 
   if (!contractAddress) {
     return jsonResponse({
-      error: 'Commitment contract not deployed yet'
+      error: 'contract_not_deployed',
+      message: 'Commitment contract not deployed yet'
     }, 503);
   }
+
+  const explorer = {
+    transaction: `https://basescan.org/tx/${hash}`,
+    contract: `https://basescan.org/address/${contractAddress}`
+  };
 
   try {
     const chain = rpcUrl.includes('sepolia') ? baseSepolia : base;
@@ -599,45 +752,84 @@ async function handleVerify(txHash, env) {
       transport: http(rpcUrl)
     });
 
-    const txHashBytes32 = txHash.startsWith('0x') ? txHash : `0x${txHash}`;
+    // ── Gate 1: the hash must be a real transaction on this chain ──
+    //
+    // commitFromTransaction() stores whatever bytes32 key it is handed. It does
+    // not and cannot check that the key is a genuine transaction hash. So a hit
+    // in the contract mapping is NOT on its own proof of anything — the existing
+    // records are keyed 0x..01 through 0x..09, which are counters, not hashes.
+    // Confirming the transaction actually exists on Base is what makes a
+    // positive answer mean something. Without this gate the endpoint affirms
+    // any small integer a skeptic types.
+    let chainTx = null;
+    try {
+      chainTx = await publicClient.getTransaction({ hash });
+    } catch (_) {
+      chainTx = null; // viem throws TransactionNotFoundError rather than returning null
+    }
 
-    // Check if commitment exists
-    const verified = await publicClient.readContract({
+    if (!chainTx) {
+      return jsonResponse({
+        tx_hash: hash,
+        verified: false,
+        reason: 'not_a_transaction_on_base',
+        record: null,
+        contract: contractAddress,
+        explorer
+      });
+    }
+
+    // ── Gate 2: a commitment must be recorded under that same hash ──
+    const committed = await publicClient.readContract({
       address: contractAddress,
       abi: COMMITMENT_ABI,
       functionName: 'verifyCommitment',
-      args: [txHashBytes32]
+      args: [hash]
     });
 
-    let record = null;
-    if (verified) {
-      const [usdcAmount, lpTokensReceived, timestamp, exists] = await publicClient.readContract({
-        address: contractAddress,
-        abi: COMMITMENT_ABI,
-        functionName: 'getCommitmentRecord',
-        args: [txHashBytes32]
+    if (!committed) {
+      return jsonResponse({
+        tx_hash: hash,
+        verified: false,
+        reason: 'no_commitment_recorded',
+        record: null,
+        contract: contractAddress,
+        explorer
       });
-
-      record = {
-        usdc_committed: Number(usdcAmount),
-        lp_tokens_received: Number(lpTokensReceived),
-        timestamp: Number(timestamp),
-        committed_at: new Date(Number(timestamp) * 1000).toISOString()
-      };
     }
 
+    const [, , timestamp, exists] = await publicClient.readContract({
+      address: contractAddress,
+      abi: COMMITMENT_ABI,
+      functionName: 'getCommitmentRecord',
+      args: [hash]
+    });
+
+    // Committed amounts are deliberately omitted — liquidity figures stay out
+    // of public responses. Timing and on-chain location are the proof.
     return jsonResponse({
-      tx_hash: txHash,
-      verified: verified,
-      record: record,
+      tx_hash: hash,
+      verified: Boolean(exists),
+      reason: exists ? null : 'no_commitment_recorded',
+      record: exists
+        ? {
+            timestamp: Number(timestamp),
+            committed_at: new Date(Number(timestamp) * 1000).toISOString(),
+            block_number: chainTx.blockNumber !== null && chainTx.blockNumber !== undefined
+              ? Number(chainTx.blockNumber)
+              : null
+          }
+        : null,
       contract: contractAddress,
-      explorer: `https://basescan.org/address/${contractAddress}`
+      explorer
     });
   } catch (err) {
+    console.error('verify failed:', err && err.message);
+    // Generic message on purpose: do not echo library internals to callers.
     return jsonResponse({
-      error: 'Verification failed',
-      message: err.message
-    }, 500);
+      error: 'verification_unavailable',
+      message: 'Could not reach the chain to verify this transaction. Try again shortly.'
+    }, 502);
   }
 }
 
@@ -666,15 +858,21 @@ async function handleLockStatus(env) {
       functionName: 'getLockStatus'
     });
 
-    const [lockExpiry, lockRemaining, isLocked, extCount, withdrawAddr] = lockData;
+    // withdrawAddr is intentionally destructured-and-dropped: see note below.
+    const [lockExpiry, lockRemaining, isLocked, extCount] = lockData;
 
-    const stats = await publicClient.readContract({
-      address: contractAddress,
-      abi: COMMITMENT_ABI,
-      functionName: 'getCommitmentStats'
-    });
+    // getCommitmentStats() is no longer read here — the only fields it supplied
+    // to this response were the withheld liquidity amounts, so the extra RPC
+    // round-trip is dead weight.
 
-    const [totalUsdcCommitted, totalLpTokensHeld] = stats;
+    // Committed amounts, LP holdings, and the withdrawal address are all
+    // withheld here for the same reasons as /loyalty/stats: the amounts are raw
+    // base-unit integers that overstate committed liquidity by 1e6 when
+    // published unscaled, canon keeps liquidity figures out of public copy
+    // entirely, and the withdrawal address is the ops wallet.
+    //
+    // The lock is the asset worth publishing: it is real, it is long, its
+    // duration is a constant in verified source, and rate changes are timelocked.
 
     return jsonResponse({
       contract: contractAddress,
@@ -684,14 +882,15 @@ async function handleLockStatus(env) {
       lock_remaining_days: Math.floor(Number(lockRemaining) / 86400),
       lock_active: isLocked,
       extension_count: Number(extCount),
-      withdrawal_address: withdrawAddr,
-      lp_tokens_held: Number(totalLpTokensHeld),
-      total_usdc_committed: Number(totalUsdcCommitted),
       verifiable_at: `https://basescan.org/address/${contractAddress}`,
       note: 'All lock data verifiable on-chain via getLockStatus() and getLockExtensionHistory()'
     });
   } catch (err) {
-    return jsonResponse({ error: 'Failed to read lock status', message: err.message }, 500);
+    console.error('lock-status failed:', err && err.message);
+    return jsonResponse({
+      error: 'lock_status_unavailable',
+      message: 'Could not reach the chain to read lock status. Try again shortly.'
+    }, 502);
   }
 }
 
@@ -912,6 +1111,43 @@ async function handleAgentSessionLookup(sessionToken, env) {
 // ============================================================
 // UTILITY
 // ============================================================
+
+// Describes a lock_type for member-facing output.
+//
+// The WIRE VALUE sent to BH is unchanged — BH's schema expects '90LOCK'/'360LOCK'
+// and that contract is not ours to break. What changes is how it is DESCRIBED to
+// the caller. A 90-day hold is a refund-window mechanism sized to the chargeback
+// period; calling it "90LOCK" made it read as a sibling of 360LOCK, competing
+// with the commitment tier that actually determines Crescendo status. It is not
+// a tier and it does not affect status.
+function describeSettlement(lockType) {
+  const key = String(lockType || '').toLowerCase();
+
+  if (key === 'none') {
+    return {
+      type: 'immediate',
+      hold_days: 0,
+      affects_status: false,
+      description: 'Settles immediately. Agent-native transactions carry no refund window.'
+    };
+  }
+
+  if (key === '360lock') {
+    return {
+      type: 'commitment',
+      hold_days: 360,
+      affects_status: true,
+      description: '360LOCK — a Crescendo commitment. Committed NCTR counts toward Crescendo status.'
+    };
+  }
+
+  return {
+    type: 'settlement_hold',
+    hold_days: 90,
+    affects_status: false,
+    description: 'Settlement hold. Earned NCTR settles after a 90-day window matching the card refund period. This is a settlement hold, not a Crescendo commitment, and it does not affect status.'
+  };
+}
 
 function jsonResponse(data, status = 200) {
   return new Response(JSON.stringify(data, null, 2), {
