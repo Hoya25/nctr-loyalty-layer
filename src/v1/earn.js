@@ -1,29 +1,33 @@
 /**
- * GET /v1/earn/{brand} — the earn ladder for a brand, derived from the Registry.
+ * GET /v1/earn/{brand} — the Alliance earn ladder.
  *
- * Derivation (per the commitment_bonus row's own canonical note):
- *   effective NCTR per $1 = base x commitment x tier multiplier
- * where base is the brand's beacon_brand_rate when one exists, else the global
- * nctr_base_earn. Commitment QUALIFIES a tier; it never multiplies a tier.
+ * Every rate comes from the Registry's own `get-display-rate`, which applies the
+ * canonical supersedes resolution server-side. Nothing here hardcodes a rate: if
+ * the atomic 10 NCTR/$1 cutover lands and retires the commitment bonus, this
+ * route follows on the next request with no code change.
  *
- * Every rate is resolved through registry.activeRate(), which walks `supersedes`
- * exactly as the Registry's own get-active-rate does. Nothing here hardcodes a
- * rate: if the 10 NCTR/$1 atomic cutover lands and retires the commitment bonus,
- * this route follows automatically because it reads whatever the Registry says
- * at request time.
+ * Commitment QUALIFIES a tier; it never multiplies a tier. The ladder is
+ * published with the commitment applied because that is the rate a committed
+ * member actually earns, and `commitment.multiplier` is shown separately so the
+ * two factors stay legible rather than blended into one opaque number.
  *
- * F7: raw source_class values never leave the Worker. They are mapped through
- * publicSourceClass() to a neutral vocabulary.
+ * KNOWN LIMIT — brand-specific rates are not applied. `beacon_brand_rate` is
+ * scoped by Beacon store_id, and get-display-rate resolves brand overrides from
+ * a different source class. Reading beacon_brand_rate directly would require a
+ * privileged Registry credential this Worker deliberately does not hold. So this
+ * route returns the ALLIANCE-WIDE ladder and says so explicitly via
+ * `brand_rate_applied: false`. It never silently presents a global rate as if it
+ * were brand-specific. See DECISIONS D10.
  */
 
 import { jsonResponse } from '../lib/http.js';
-import { activeRate, rateToNumber } from '../lib/registry.js';
+import { displayRate } from '../lib/registry.js';
 import { restGet } from '../lib/supabase.js';
-import { publicSourceClass, assertClean } from '../lib/disclosure.js';
+import { assertClean } from '../lib/disclosure.js';
 
 const TIER_ORDER = ['bronze', 'silver', 'gold', 'platinum', 'diamond'];
 
-async function resolveStoreId(env, slug) {
+async function resolveBrand(env, slug) {
   const params = new URLSearchParams();
   params.set('select', 'store_id,store_name,public_slug');
   params.set('public_slug', `eq.${slug}`);
@@ -35,61 +39,43 @@ async function resolveStoreId(env, slug) {
 }
 
 async function handleEarn(slug, env) {
-  // Degrade honestly rather than throwing when the Registry binding is absent.
-  // A 503 that says the ladder is unavailable is a true statement; a 500 from a
-  // failed fetch is not, and a hardcoded fallback rate would be worse than both.
-  if (!env.REGISTRY_SUPABASE_URL || !env.REGISTRY_ANON_KEY) {
+  if (!env.REGISTRY_SUPABASE_URL) {
     return jsonResponse({
       error: 'earn_unavailable',
       message: 'The earn ladder is not currently available.'
     }, 503);
   }
 
-  const brand = await resolveStoreId(env, slug);
+  const brand = await resolveBrand(env, slug);
   if (!brand) return jsonResponse({ error: 'brand_not_found', slug }, 404);
 
-  // Brand-scoped rate wins over the global base when one exists.
-  const [brandRow, baseRow, commitmentRow] = await Promise.all([
-    activeRate(env, 'beacon_brand_rate', brand.store_id),
-    activeRate(env, 'nctr_base_earn', null),
-    activeRate(env, 'commitment_bonus', null)
-  ]);
-
-  const sourceRow = brandRow || baseRow;
-  const baseRate = rateToNumber(sourceRow);
-
-  if (baseRate === null) {
-    return jsonResponse({ error: 'rate_unavailable', slug }, 503);
-  }
-
-  const commitmentMultiplier = rateToNumber(commitmentRow) ?? 1;
-
-  const tiers = [];
-  for (const tier of TIER_ORDER) {
-    const row = await activeRate(env, 'crescendo_earn_multiplier', tier);
-    const mult = rateToNumber(row);
-    if (mult === null) continue;
-    tiers.push({
-      tier,
-      multiplier: mult,
-      // Standing math only. No USD, no price, no value.
-      nctr_per_dollar: Number((baseRate * commitmentMultiplier * mult).toFixed(4))
-    });
+  let rows;
+  try {
+    rows = await Promise.all(TIER_ORDER.map((t) => displayRate(env, { tier: t, lock: true })));
+  } catch {
+    return jsonResponse({
+      error: 'earn_unavailable',
+      message: 'The earn ladder is not currently available.'
+    }, 503);
   }
 
   const body = {
     generated_at: new Date().toISOString(),
     brand: { public_slug: brand.public_slug, store_name: brand.store_name },
     base: {
-      nctr_per_dollar: baseRate,
-      source: publicSourceClass(sourceRow.source_class),
-      scoped_to_brand: Boolean(brandRow)
+      nctr_per_dollar: rows[0].base_rate,
+      brand_rate_applied: false,
+      note: 'Alliance-wide base rate. A brand-specific rate, where one exists, is not reflected here.'
     },
     commitment: {
-      multiplier: commitmentMultiplier,
+      multiplier: rows[0].lock_multiplier,
       note: 'Committing NCTR qualifies you for a tier. It does not multiply a tier.'
     },
-    tiers
+    tiers: TIER_ORDER.map((tier, i) => ({
+      tier,
+      multiplier: rows[i].tier_multiplier,
+      nctr_per_dollar: rows[i].effective_rate
+    }))
   };
   return jsonResponse(assertClean(body));
 }

@@ -100,6 +100,15 @@ async function handleTiers(env) {
   } else {
     // View unreachable. Serve the constant and say so — a silent fallback that
     // looks identical to fresh data is how stale facts survive unnoticed.
+    //
+    // ROOT CAUSE, diagnosed 2026-09-01: this is not an outage. BH has no tier
+    // schedule at all. `crescendo_schedule_public` returns PGRST205, and BH's
+    // public schema carries no table or view holding nctr_required /
+    // earn_multiplier under any name — the view was never built. X1b, the BH
+    // tier mirror, is still open in the earn-rate cutover lane. So this branch
+    // is the permanent path until X1b lands, and `degraded: true` correctly
+    // stays on the public surface while that is true: the honest statement to
+    // an agent is that nothing is syncing. See DECISIONS D9.
     crescendoTiers = Object.entries(TIERS).map(([, val]) => ({
       name: val.label,
       nctr_required: val.threshold,
