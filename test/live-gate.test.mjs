@@ -65,6 +65,29 @@ test('MCP tool output passes the gate', { skip: !BASE }, async (t) => {
     const body = await call('where_it_pays', { brand: 'anything' });
     assert.ok(scan(body).clean, `where_it_pays leaked: ${scan(body).hits.join(', ')}`);
   });
+
+  // The dangerous case is a REAL discovery-layer hit: that row carries a
+  // vendor-named id column and a tracked affiliate_url upstream. A miss proves
+  // nothing, so assert against a brand that is actually in the network.
+  await t.test('a real discovery-layer hit leaks no vendor field', async () => {
+    const body = await call('where_it_pays', { brand: 'nike' });
+    const { clean, hits } = scan(body);
+    assert.ok(clean, `coverage hit leaked banned vocabulary: ${hits.join(', ')}`);
+    assert.ok(!/affiliate_url|merchant_url|logo_url/.test(body),
+      'upstream URL columns must never be selected or surfaced');
+    assert.ok(!/_id"/.test(body), 'no vendor-named id column may appear');
+    const result = JSON.parse(JSON.parse(/data: (\{.*)/s.exec(body)[1]).result.content[0].text);
+    assert.equal(result.in_network, true, 'nike should resolve in the discovery layer');
+    assert.equal(result.coverage_complete, true, 'both systems must be reachable in prod');
+  });
+
+  await t.test('coverage_complete is true in production — both systems wired', async () => {
+    const body = await call('where_it_pays', { brand: 'a-brand-that-does-not-exist-xyz' });
+    const result = JSON.parse(JSON.parse(/data: (\{.*)/s.exec(body)[1]).result.content[0].text);
+    assert.equal(result.coverage_complete, true);
+    assert.equal(result.in_network, false,
+      'with both systems answering, a genuine miss is false, not null');
+  });
 });
 
 test('excluded brands are unreachable on every public surface', { skip: !BASE }, async (t) => {
