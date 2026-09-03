@@ -24,6 +24,7 @@ import { jsonResponse } from '../lib/http.js';
 import { displayRate } from '../lib/registry.js';
 import { restGet } from '../lib/supabase.js';
 import { assertClean } from '../lib/disclosure.js';
+import { isExcluded } from '../lib/exclusions.js';
 
 const TIER_ORDER = ['bronze', 'silver', 'gold', 'platinum', 'diamond'];
 
@@ -45,6 +46,9 @@ async function handleEarn(slug, env) {
       message: 'The earn ladder is not currently available.'
     }, 503);
   }
+
+  // Excluded brands are unreachable here too, or the exclusion is cosmetic.
+  if (isExcluded(slug)) return jsonResponse({ error: 'brand_not_found', slug }, 404);
 
   const brand = await resolveBrand(env, slug);
   if (!brand) return jsonResponse({ error: 'brand_not_found', slug }, 404);

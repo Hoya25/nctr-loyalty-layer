@@ -15,6 +15,7 @@ import { jsonResponse } from '../lib/http.js';
 import {
   BRAND_PUBLIC_FIELDS, OFFER_PUBLIC_FIELDS, projectAll, project, assertClean
 } from '../lib/disclosure.js';
+import { isExcluded, withoutExcluded } from '../lib/exclusions.js';
 
 const BRAND_VIEW = 'agent_safe_brand_profiles_public';
 const OFFER_TABLE = 'agent_offer_feeds';
@@ -51,7 +52,9 @@ async function handleBounties(url, env) {
   const brandFilter = url.searchParams.get('brand');
 
   const rows = await fetchBrands(env, { slug: brandFilter || undefined });
-  const filtered = rows.filter((b) => matchesKeyword(b, keyword));
+  // Exclusions are applied before any other filter, so an excluded brand can
+  // never be reached by a keyword or brand query either.
+  const filtered = withoutExcluded(rows).filter((b) => matchesKeyword(b, keyword));
 
   const body = {
     generated_at: new Date().toISOString(),
@@ -62,6 +65,10 @@ async function handleBounties(url, env) {
 }
 
 async function handleBrandBounty(slug, env) {
+  // Same 404 as a slug that does not exist. An excluded brand is not announced.
+  if (isExcluded(slug)) {
+    return jsonResponse({ error: 'brand_not_found', slug }, 404);
+  }
   const rows = await fetchBrands(env, { slug });
   if (!rows.length) {
     return jsonResponse({ error: 'brand_not_found', slug }, 404);
@@ -78,4 +85,4 @@ async function handleBrandBounty(slug, env) {
   return jsonResponse(assertClean(body));
 }
 
-export { handleBounties, handleBrandBounty };
+export { handleBounties, handleBrandBounty, matchesKeyword };

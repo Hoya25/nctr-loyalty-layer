@@ -15,6 +15,7 @@ import { handleBounties, handleBrandBounty } from '../v1/bounties.js';
 import { handleDemand } from '../v1/demand.js';
 import { handleEarn } from '../v1/earn.js';
 import { restGet } from '../lib/supabase.js';
+import { withoutExcluded } from '../lib/exclusions.js';
 
 const TOOLS = [
   {
@@ -80,8 +81,10 @@ async function whereItPays(brandQuery, env) {
   params.set('select', 'public_slug,store_name,bounty_earn_displayed');
   params.set('or', `(public_slug.eq.${brandQuery},store_name.ilike.*${brandQuery}*)`);
   try {
-    const rows = await restGet(env.BEACON_SUPABASE_URL, env.BEACON_ANON_KEY,
+    const raw = await restGet(env.BEACON_SUPABASE_URL, env.BEACON_ANON_KEY,
       `agent_safe_brand_profiles_public?${params}`);
+    // An excluded brand must not be reported as in-network.
+    const rows = withoutExcluded(raw);
     checked.push('direct_merchants');
     if (rows.length) { found = true; match = rows[0]; }
   } catch (e) {

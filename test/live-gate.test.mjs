@@ -11,6 +11,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { scan } from '../src/lib/disclosure.js';
+import { EXCLUDED_SLUGS } from '../src/lib/exclusions.js';
 
 const BASE = process.env.BASE;
 const ENDPOINTS = [
@@ -64,4 +65,35 @@ test('MCP tool output passes the gate', { skip: !BASE }, async (t) => {
     const body = await call('where_it_pays', { brand: 'anything' });
     assert.ok(scan(body).clean, `where_it_pays leaked: ${scan(body).hits.join(', ')}`);
   });
+});
+
+test('excluded brands are unreachable on every public surface', { skip: !BASE }, async (t) => {
+  for (const slug of EXCLUDED_SLUGS.keys()) {
+    await t.test(slug, async () => {
+      const list = await (await fetch(`${BASE}/v1/bounties`)).json();
+      assert.ok(!(list.brands || []).some((b) => b.public_slug === slug),
+        `${slug} still appears in /v1/bounties`);
+
+      for (const path of [`/v1/bounties/${slug}`, `/v1/earn/${slug}`]) {
+        const res = await fetch(BASE + path);
+        assert.equal(res.status, 404, `${path} should 404`);
+        const body = await res.json();
+        assert.equal(body.error, 'brand_not_found',
+          `${path} must not disclose that the brand exists`);
+      }
+
+      // where_it_pays must not report an excluded brand as in-network.
+      const res = await fetch(BASE + '/mcp', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call',
+          params: { name: 'where_it_pays', arguments: { brand: slug } } })
+      });
+      const text = await res.text();
+      const payload = JSON.parse(/data: (\{.*)/s.exec(text)[1]);
+      const result = JSON.parse(payload.result.content[0].text);
+      assert.notEqual(result.in_network, true,
+        `where_it_pays reported excluded ${slug} as in-network`);
+    });
+  }
 });
