@@ -96,3 +96,42 @@ test('a brand slug is URL-encoded into the api field', () => {
   assert.ok(!/ /.test(doc.api));
   assert.match(doc.api, /a%20b%2Fc/);
 });
+
+// ── The vendored schema must not drift from the published one ───────────────
+// A copy served from our own domain is only trustworthy while it matches the
+// canonical document. This asserts it does, so the gate fails on drift rather
+// than an app validating against a stale contract.
+
+import { SCHEMA_V0_2, SCHEMA_V1 } from '../src/lib/bounty-json-schema.js';
+
+const IGNORE = new Set(['$id']); // $id is intentionally rewritten to our URL
+
+function sameShape(a, b, path = '') {
+  const diffs = [];
+  const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
+  for (const k of keys) {
+    if (IGNORE.has(k) && !path) continue;
+    const av = a[k], bv = b[k], at = `${path}/${k}`;
+    if (typeof av === 'object' && av && typeof bv === 'object' && bv) {
+      diffs.push(...sameShape(av, bv, at));
+    } else if (JSON.stringify(av) !== JSON.stringify(bv)) {
+      diffs.push(`${at}: served=${JSON.stringify(av)} published=${JSON.stringify(bv)}`);
+    }
+  }
+  return diffs;
+}
+
+test('vendored v0.2 matches the published schema', () => {
+  assert.deepEqual(sameShape(SCHEMA_V0_2, schema), []);
+  assert.equal(SCHEMA_V0_2.$id, 'https://api.nctr.live/schema/bounty/v0.2.json');
+});
+
+test('vendored v1 matches the published schema', () => {
+  assert.deepEqual(sameShape(SCHEMA_V1, schema), []);
+  assert.equal(SCHEMA_V1.$id, 'https://api.nctr.live/schema/bounty/v1.json');
+});
+
+test('the pinned copy accepts both version strings', () => {
+  const pat = new RegExp(SCHEMA_V0_2.properties.bounty_schema_version.pattern);
+  assert.ok(pat.test('0.1') && pat.test('0.2'));
+});

@@ -48,11 +48,12 @@ import { handleEarn } from './v1/earn.js';
 import { handleDemand } from './v1/demand.js';
 import { handleMcp } from './mcp/server.js';
 import { allianceBounty } from './lib/bounty-schema.js';
+import { SCHEMA_V0_2, SCHEMA_V1 } from './lib/bounty-json-schema.js';
 
 const VERSION = '2.2.0';
 
 // Cache TTLs. /v1/demand matches the origin's own max-age=3600.
-const TTL = { bounties: 120, brand: 300, earn: 300, demand: 3600, wellKnown: 3600 };
+const TTL = { bounties: 120, brand: 300, earn: 300, demand: 3600, wellKnown: 3600, schema: 86400 };
 
 export default {
   async fetch(request, env, ctx) {
@@ -128,6 +129,22 @@ export default {
           return await handleAgentSessionLookup(param, env);
         }
         return jsonResponse({ error: 'method not allowed' }, 405);
+      }
+
+      // ── Open Bounty Schema: the schema document itself ────────────────────
+      // A stable address the Registry controls, so implementers do not depend on
+      // a GitHub branch name. v1 tracks the latest 0.x; pinned versions freeze.
+      if (path === '/schema/bounty/v1.json' || path === '/schema/bounty/v0.2.json') {
+        const doc = path.endsWith('v1.json') ? SCHEMA_V1 : SCHEMA_V0_2;
+        return await cached(request, ctx, TTL.schema, async () =>
+          new Response(JSON.stringify(doc, null, 2), {
+            status: 200,
+            headers: {
+              ...CORS_HEADERS,
+              // application/schema+json is the registered type for JSON Schema.
+              'Content-Type': 'application/schema+json; charset=utf-8'
+            }
+          }));
       }
 
       // ── Open Bounty Schema: the Alliance's own program-level object ───────

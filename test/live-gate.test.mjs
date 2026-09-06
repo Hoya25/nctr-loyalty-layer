@@ -139,3 +139,18 @@ test('live /.well-known/bounty.json conforms to the published schema', { skip: !
   assert.ok(scan(doc).clean, `well-known object leaked: ${scan(doc).hits.join(', ')}`);
   assert.ok(!/\d/.test(doc.earn.display), 'earn.display must not carry a rate');
 });
+
+test('the schema endpoints serve the real schema', { skip: !BASE }, async (t) => {
+  for (const path of ['/schema/bounty/v1.json', '/schema/bounty/v0.2.json']) {
+    await t.test(path, async () => {
+      const res = await fetch(BASE + path);
+      assert.equal(res.status, 200);
+      assert.match(res.headers.get('content-type') || '', /schema\+json/);
+      const doc = await res.json();
+      assert.equal(doc.$schema, 'https://json-schema.org/draft/2020-12/schema');
+      assert.equal(doc.$id, 'https://api.nctr.live' + path);
+      assert.ok(doc.required.includes('bounty_schema_version'));
+      assert.ok(scan(doc).clean);
+    });
+  }
+});
