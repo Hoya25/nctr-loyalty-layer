@@ -151,8 +151,14 @@ export default {
       // Program-level, so it is true on day one regardless of how many stores
       // the index lists. https://github.com/Hoya25/open-bounty-schema
       if (path === '/.well-known/bounty.json') {
-        return await cached(request, ctx, TTL.wellKnown, async () =>
-          jsonResponse(allianceBounty()));
+        return await cached(request, ctx, TTL.wellKnown, async () => {
+          const res = jsonResponse(allianceBounty());
+          // The object cannot carry a schema field — the schema sets
+          // additionalProperties:false — so the reference goes in a Link header,
+          // which is the registered way to point a JSON document at its schema.
+          res.headers.set('Link', '<https://api.nctr.live/schema/bounty/v1.json>; rel="describedby"');
+          return res;
+        });
       }
 
       // ── Alliance Registry (v1) ────────────────────────────────────────────
