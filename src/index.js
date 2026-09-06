@@ -47,11 +47,12 @@ import { handleBounties, handleBrandBounty } from './v1/bounties.js';
 import { handleEarn } from './v1/earn.js';
 import { handleDemand } from './v1/demand.js';
 import { handleMcp } from './mcp/server.js';
+import { allianceBounty } from './lib/bounty-schema.js';
 
 const VERSION = '2.2.0';
 
 // Cache TTLs. /v1/demand matches the origin's own max-age=3600.
-const TTL = { bounties: 120, brand: 300, earn: 300, demand: 3600 };
+const TTL = { bounties: 120, brand: 300, earn: 300, demand: 3600, wellKnown: 3600 };
 
 export default {
   async fetch(request, env, ctx) {
@@ -129,6 +130,14 @@ export default {
         return jsonResponse({ error: 'method not allowed' }, 405);
       }
 
+      // ── Open Bounty Schema: the Alliance's own program-level object ───────
+      // Program-level, so it is true on day one regardless of how many stores
+      // the index lists. https://github.com/Hoya25/open-bounty-schema
+      if (path === '/.well-known/bounty.json') {
+        return await cached(request, ctx, TTL.wellKnown, async () =>
+          jsonResponse(allianceBounty()));
+      }
+
       // ── Alliance Registry (v1) ────────────────────────────────────────────
       if (path === '/v1/bounties') {
         return await cached(request, ctx, TTL.bounties, () => handleBounties(url, env));
@@ -137,7 +146,8 @@ export default {
       const brandMatch = path.match(/^\/v1\/bounties\/([^/]+)$/);
       if (brandMatch) {
         const slug = decodeURIComponent(brandMatch[1]);
-        return await cached(request, ctx, TTL.brand, () => handleBrandBounty(slug, env));
+        const format = url.searchParams.get('format');
+        return await cached(request, ctx, TTL.brand, () => handleBrandBounty(slug, env, format));
       }
 
       const earnMatch = path.match(/^\/v1\/earn\/([^/]+)$/);

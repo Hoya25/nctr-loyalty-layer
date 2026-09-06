@@ -120,3 +120,22 @@ test('excluded brands are unreachable on every public surface', { skip: !BASE },
     });
   }
 });
+
+test('live /.well-known/bounty.json conforms to the published schema', { skip: !BASE }, async () => {
+  const [schemaRes, docRes] = await Promise.all([
+    fetch('https://raw.githubusercontent.com/Hoya25/open-bounty-schema/main/schema/bounty.schema.json'),
+    fetch(BASE + '/.well-known/bounty.json')
+  ]);
+  assert.equal(docRes.status, 200);
+  const schema = await schemaRes.json();
+  const doc = await docRes.json();
+
+  for (const key of schema.required) assert.ok(key in doc, `missing required ${key}`);
+  for (const key of Object.keys(doc)) {
+    assert.ok(schema.properties[key], `${key} is not permitted by the schema`);
+  }
+  assert.ok(schema.properties.earn.properties.type.enum.includes(doc.earn.type));
+  assert.match(doc.updated_at, new RegExp(schema.properties.updated_at.pattern));
+  assert.ok(scan(doc).clean, `well-known object leaked: ${scan(doc).hits.join(', ')}`);
+  assert.ok(!/\d/.test(doc.earn.display), 'earn.display must not carry a rate');
+});

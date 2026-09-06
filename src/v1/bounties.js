@@ -16,6 +16,7 @@ import {
   BRAND_PUBLIC_FIELDS, OFFER_PUBLIC_FIELDS, projectAll, project, assertClean
 } from '../lib/disclosure.js';
 import { isExcluded, withoutExcluded } from '../lib/exclusions.js';
+import { brandBounty, SCHEMA_URL } from '../lib/bounty-schema.js';
 
 const BRAND_VIEW = 'agent_safe_brand_profiles_public';
 const OFFER_TABLE = 'agent_offer_feeds';
@@ -64,7 +65,7 @@ async function handleBounties(url, env) {
   return jsonResponse(assertClean(body));
 }
 
-async function handleBrandBounty(slug, env) {
+async function handleBrandBounty(slug, env, format = null) {
   // Same 404 as a slug that does not exist. An excluded brand is not announced.
   if (isExcluded(slug)) {
     return jsonResponse({ error: 'brand_not_found', slug }, 404);
@@ -76,8 +77,22 @@ async function handleBrandBounty(slug, env) {
   const brand = rows[0];
   const offers = await fetchOffers(env, brand.store_id);
 
+  // The Open Bounty Schema's `api` field points here, and a conforming agent
+  // follows it for live detail. Two shapes, one source:
+  //   ?format=bounty  -> the bare object, which validates strictly against the
+  //                      published JSON Schema (additionalProperties: false, so
+  //                      it cannot carry our extra keys)
+  //   default         -> the full record with the schema object nested under
+  //                      `bounty`, additive so existing callers do not break
+  const bounty = brandBounty(brand);
+  if (format === 'bounty') {
+    return jsonResponse(assertClean(bounty));
+  }
+
   const body = {
     generated_at: new Date().toISOString(),
+    bounty_schema: SCHEMA_URL,
+    bounty,
     brand: project(brand, BRAND_PUBLIC_FIELDS),
     offer_count: offers.length,
     offers: projectAll(offers, OFFER_PUBLIC_FIELDS)
