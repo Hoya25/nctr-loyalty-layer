@@ -15,7 +15,10 @@
  * Never put a rate, a price, a USD value or a yield in `earn.display`.
  */
 
-const SCHEMA_VERSION = '0.1';
+// The Alliance models the current spec version. v0.2 changed the discovery order
+// in §4, not the object, so this bump is a statement of which spec we implement —
+// v0.1 objects remain valid and agents must accept both.
+const SCHEMA_VERSION = '0.2';
 const SCHEMA_URL = 'https://github.com/Hoya25/open-bounty-schema';
 const SCHEMA_JSON_URL = 'https://raw.githubusercontent.com/Hoya25/open-bounty-schema/main/schema/bounty.schema.json';
 
